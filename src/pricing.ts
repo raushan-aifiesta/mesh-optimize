@@ -15,8 +15,16 @@ const PRICING: Record<string, ModelPricing> = {
 
 const DEFAULT_PRICING: ModelPricing = { input: 3, output: 15 };
 
+/** Mesh serves models with provider prefixes ("anthropic/claude-fable-5").
+ * All matching happens on the bare model id, lowercased. */
+export function normalizeModel(model: string): string {
+  const lower = model.toLowerCase();
+  const slash = lower.lastIndexOf("/");
+  return slash === -1 ? lower : lower.slice(slash + 1);
+}
+
 export function pricingFor(model: string): ModelPricing {
-  return PRICING[model] ?? DEFAULT_PRICING;
+  return PRICING[normalizeModel(model)] ?? DEFAULT_PRICING;
 }
 
 /** Minimum cacheable prefix in tokens. Below this, cache_control silently
@@ -29,16 +37,17 @@ const CACHE_MINIMUMS: Array<[RegExp, number]> = [
 ];
 
 export function cacheMinimumTokens(model: string): number {
+  const bare = normalizeModel(model);
   for (const [pattern, min] of CACHE_MINIMUMS) {
-    if (pattern.test(model)) return min;
+    if (pattern.test(bare)) return min;
   }
   return 2048;
 }
 
 export function isAnthropicModel(model: string): boolean {
-  return model.startsWith("claude");
+  return normalizeModel(model).startsWith("claude");
 }
 
 export function isFableModel(model: string): boolean {
-  return model.includes("fable");
+  return normalizeModel(model).includes("fable");
 }

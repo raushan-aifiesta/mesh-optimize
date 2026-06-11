@@ -169,3 +169,16 @@ test("mesh params are stripped before forwarding to the provider", () => {
   assert.equal(out.mesh_optimize, undefined);
   assert.equal(out.mesh_hints, undefined);
 });
+
+test("mesh provider-prefixed model ids resolve to the bare model", () => {
+  const optimizer = new MeshOptimizer();
+  const request = agenticRequest();
+  request.model = "anthropic/claude-fable-5";
+  const { request: out, plan } = optimizer.prepare(request);
+  // fable guards fire despite the prefix
+  assert.equal(out.temperature, undefined);
+  assert.equal(out.top_k, undefined);
+  // pruning + cache still apply
+  assert.ok(plan.leversApplied.includes("tool_result_pruning"));
+  assert.ok(plan.leversApplied.includes("cache_injection"));
+});

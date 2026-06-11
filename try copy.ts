@@ -2,23 +2,17 @@ import { MeshOptimizer, attachSavings } from "./src/index.js";
 
 const optimizer = new MeshOptimizer({ defaultDial: 0.2 });
 
-// the model id exactly as Mesh serves it, provider prefix included
 const { request, plan } = optimizer.prepare({
-  model: "anthropic/claude-fable-5",
+  model: "claude-fable-5",
   mesh_optimize: 0.3,
   system: "You are a coding agent. ".repeat(600),
   messages: [
-    { role: "user", content: "fix the failing test in auth.ts" },
-    { role: "assistant", content: "Let me look at the file." },
-    // a fat tool result from an early turn: the model already consumed it,
-    // and it is old enough (outside the last 4 messages) to be pruned
-    { role: "tool", content: "FAIL auth.test.ts ".repeat(800) },
-    { role: "assistant", content: "Found it, patching now." },
-    { role: "user", content: "also run the linter" },
-    { role: "assistant", content: "Linter is clean." },
+    { role: "user", content: "fix the failing test" },
+    { role: "assistant", content: "Looking." },
+    { role: "tool", content: "x".repeat(5000) },
+    { role: "assistant", content: "Patched." },
     { role: "user", content: "status?" },
   ],
-  tools: [{ name: "bash" }],
   temperature: 0.7,
 });
 
@@ -27,10 +21,8 @@ console.log("levers applied:", plan.leversApplied);
 console.log("system is now cached:", Array.isArray(request.system));
 console.log("estimated tokens pruned:", plan.estimatedTokensRemoved);
 console.log("temperature stripped for fable:", request.temperature === undefined);
-console.log("\naudit trail:");
-for (const entry of plan.audit) console.log(` - [${entry.lever}] ${entry.action}`);
 
-// simulate the provider response on a warm cache (second request of a session)
+// simulate a provider response with a cache hit
 const enriched = attachSavings(plan, {
   usage: { input_tokens: 500, cache_read_input_tokens: 100_000, output_tokens: 800 },
 });
