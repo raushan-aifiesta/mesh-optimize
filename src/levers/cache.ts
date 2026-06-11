@@ -59,11 +59,26 @@ export function applyCacheInjection(
   }
 
   const messages = request.messages ?? [];
+
+  // OpenAI-shape traffic carries the system prompt as messages[0]
+  const first = messages[0];
+  if (!applied && first && first.role === "system") {
+    const firstTokens = estimateTokens(first.content);
+    if (firstTokens >= minimum) {
+      first.cache_control = { ...EPHEMERAL };
+      audit.push({
+        lever: "cache_injection",
+        action: `breakpoint on system message (~${firstTokens} tokens)`,
+      });
+      applied = true;
+    }
+  }
+
   if (messages.length >= 3) {
     const history = messages.slice(0, -1);
     const prefixTokens = systemTokens + estimateConversationTokens(history);
-    if (prefixTokens >= minimum) {
-      const anchor = history[history.length - 1] as ChatMessage;
+    const anchor = history[history.length - 1] as ChatMessage;
+    if (prefixTokens >= minimum && anchor.cache_control === undefined) {
       anchor.cache_control = { ...EPHEMERAL };
       audit.push({
         lever: "cache_injection",

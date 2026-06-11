@@ -182,3 +182,18 @@ test("mesh provider-prefixed model ids resolve to the bare model", () => {
   assert.ok(plan.leversApplied.includes("tool_result_pruning"));
   assert.ok(plan.leversApplied.includes("cache_injection"));
 });
+
+test("openai-shape system message (messages[0]) gets a breakpoint", () => {
+  const optimizer = new MeshOptimizer();
+  const { request: out, plan } = optimizer.prepare({
+    model: "anthropic/claude-fable-5",
+    mesh_optimize: 0.2,
+    messages: [
+      { role: "system", content: "house rules. ".repeat(800) },
+      { role: "user", content: "fix the failing test" },
+    ],
+  });
+  const system = out.messages[0] as any;
+  assert.deepEqual(system.cache_control, { type: "ephemeral" });
+  assert.ok(plan.leversApplied.includes("cache_injection"));
+});

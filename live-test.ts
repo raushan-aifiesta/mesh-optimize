@@ -2,9 +2,14 @@
  * Live bill comparison against the real Mesh API.
  *
  * Sends the same agentic conversation three times:
- *   1. dial 0    - baseline, exactly what the client sent
- *   2. dial 0.3  - optimized, cold cache (first request pays the write premium)
- *   3. dial 0.3  - optimized, warm cache (where agentic traffic lives)
+ *   1. baseline      - exactly what a client would send today
+ *   2. optimized     - dial 0.3, cold cache (first request pays the write premium)
+ *   3. optimized     - dial 0.3, warm cache (where agentic traffic lives)
+ *
+ * Request shape follows the published schema at developers.meshapi.ai:
+ * system prompt as messages[0], tool messages carry tool_call_id, tools in
+ * OpenAI function format. mesh_optimize is never sent over the wire; this
+ * package IS the middleware, so optimization happens locally before send.
  *
  * Run: npx tsx live-test.ts
  *
@@ -43,16 +48,50 @@ function conversation(): MeshRequest {
   return {
     model: MODEL,
     max_tokens: 300, // keep the live test cheap; the lever defers to client values
-    system:
-      "You are a careful coding agent for a TypeScript monorepo. " +
-      "Follow the house style guide strictly. ".repeat(300),
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "bash",
+          description: "Run a shell command in the repository",
+          parameters: {
+            type: "object",
+            properties: { cmd: { type: "string" } },
+            required: ["cmd"],
+          },
+        },
+      },
+    ],
     messages: [
+      {
+        role: "system",
+        content:
+          "You are a careful coding agent for a TypeScript monorepo. " +
+          "Follow the house style guide strictly. ".repeat(300),
+      },
       { role: "user", content: "fix the failing test in auth.ts" },
-      { role: "assistant", content: "Let me look at the test output first." },
-      { role: "tool", content: "FAIL auth.test.ts > rejects expired tokens\n".repeat(400) },
-      { role: "assistant", content: "The expiry check uses seconds, the token uses ms. Patching." },
+      {
+        role: "assistant",
+        content: "Running the test suite first.",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "bash", arguments: '{"cmd":"npm test"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: "FAIL auth.test.ts > rejects expired tokens\n".repeat(400),
+      },
+      {
+        role: "assistant",
+        content: "The expiry check uses seconds, the token uses ms. Patching.",
+      },
       { role: "user", content: "also run the linter" },
-      { role: "assistant", content: "Linter is clean, two warnings auto-fixed." },
+      { role: "assistant", content: "Linter is clean." },
       { role: "user", content: "summarize the current status in one line" },
     ],
   };
@@ -63,7 +102,6 @@ interface CallResult {
   usage: ProviderUsage;
   costUsd: number;
   ms: number;
-  receipt?: unknown;
 }
 
 function costOf(usage: ProviderUsage, model: string): number {
@@ -81,7 +119,7 @@ function costOf(usage: ProviderUsage, model: string): number {
   );
 }
 
-async function callMesh(body: Record<string, unknown>, label: string): Promise<CallResult> {
+async function post(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; json: any; ms: number }> {
   const started = Date.now();
   const response = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
@@ -91,15 +129,40 @@ async function callMesh(body: Record<string, unknown>, label: string): Promise<C
     },
     body: JSON.stringify(body),
   });
-  const ms = Date.now() - started;
   const json: any = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    console.error(`\n[${label}] HTTP ${response.status}`);
-    console.error(JSON.stringify(json, null, 2).slice(0, 2000));
+  return { ok: response.ok, status: response.status, json, ms: Date.now() - started };
+}
+
+async function callMesh(body: Record<string, unknown>, label: string): Promise<CallResult> {
+  const result = await post(body);
+  if (!result.ok) {
+    console.error(`\n[${label}] HTTP ${result.status}`);
+    console.error(JSON.stringify(result.json, null, 2).slice(0, 1500));
+
+    // diagnose: does a minimal request work at all?
+    const probe = await post({
+      model: MODEL,
+      max_tokens: 50,
+      messages: [{ role: "user", content: "say ok" }],
+    });
+    if (probe.ok) {
+      console.error(
+        "\ndiagnosis: a minimal request to the same model succeeds, so the " +
+          "failure is something in this request's shape. if this is call 2 or 3, " +
+          "the gateway likely rejects the injected cache_control fields, which " +
+          "means cache passthrough needs gateway-side support before phase 1 ships.",
+      );
+    } else {
+      console.error(
+        `\ndiagnosis: even a minimal request fails (HTTP ${probe.status}), so the ` +
+          "model or endpoint is the problem, not the request shape. try " +
+          "MESH_MODEL=anthropic/claude-sonnet-4.6 or check the key.",
+      );
+    }
     process.exit(1);
   }
-  const usage: ProviderUsage = json.usage ?? {};
-  return { label, usage, costUsd: costOf(usage, MODEL), ms };
+  const usage: ProviderUsage = result.json.usage ?? {};
+  return { label, usage, costUsd: costOf(usage, MODEL), ms: result.ms };
 }
 
 function printResult(r: CallResult): void {
@@ -117,18 +180,18 @@ const optimizer = new MeshOptimizer();
 console.log(`model: ${MODEL}`);
 console.log(`endpoint: ${BASE_URL}/chat/completions`);
 
-// 1. baseline at dial 0
-const baselineBody = { ...conversation(), mesh_optimize: 0 };
-const baseline = await callMesh(baselineBody, "1. baseline (dial 0)");
+// 1. baseline: the raw request, untouched
+const baseline = await callMesh(conversation() as Record<string, unknown>, "1. baseline");
 printResult(baseline);
 
-// 2. optimized, cold cache
+// 2. optimized locally at dial 0.3, cold cache
 const { request: optimized, plan } = optimizer.prepare({
   ...conversation(),
   mesh_optimize: 0.3,
 });
 console.log(`\nlevers applied locally: ${plan.leversApplied.join(", ")}`);
-const cold = await callMesh(optimized as Record<string, unknown>, "2. optimized, cold cache (dial 0.3)");
+console.log(`estimated tokens pruned: ${plan.estimatedTokensRemoved}`);
+const cold = await callMesh(optimized as Record<string, unknown>, "2. optimized, cold cache");
 printResult(cold);
 
 // 3. optimized again, warm cache. prepare() is deterministic, so the bytes
@@ -137,7 +200,7 @@ const { request: optimizedAgain, plan: plan2 } = optimizer.prepare({
   ...conversation(),
   mesh_optimize: 0.3,
 });
-const warm = await callMesh(optimizedAgain as Record<string, unknown>, "3. optimized, warm cache (dial 0.3)");
+const warm = await callMesh(optimizedAgain as Record<string, unknown>, "3. optimized, warm cache");
 printResult(warm);
 
 const receipt = attachSavings(plan2, { usage: warm.usage });
@@ -147,7 +210,7 @@ console.log(JSON.stringify(receipt.mesh_savings, null, 2));
 const delta = baseline.costUsd - warm.costUsd;
 const pct = baseline.costUsd > 0 ? (delta / baseline.costUsd) * 100 : 0;
 console.log("\n================ bill comparison ================");
-console.log(`baseline (dial 0):        $${baseline.costUsd.toFixed(6)}`);
+console.log(`baseline:                  $${baseline.costUsd.toFixed(6)}`);
 console.log(`optimized warm (dial 0.3): $${warm.costUsd.toFixed(6)}`);
 console.log(`saved per request:         $${delta.toFixed(6)}  (${pct.toFixed(1)}%)`);
 console.log("=================================================");
