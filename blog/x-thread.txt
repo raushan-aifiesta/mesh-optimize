@@ -1,0 +1,132 @@
+X THREAD: mesh optimize (beta)
+author: Raushan Sharma
+attachments noted per post. all numbers are real outputs from the build.
+no em dashes anywhere. straight quotes only.
+
+---
+
+1/
+fable 5 is $10/$50 per million tokens. people are draining $100 plans in 9 minutes.
+
+we sit in the request path of 300+ models at mesh api. so we built a dial that cuts the bill without touching your code.
+
+day 54 of building in public. this one has receipts. literally.
+
+[attach: flow.svg or hero screenshot of the receipt JSON]
+
+2/
+the insight nobody believes until they do the math:
+
+your IDE agent re-sends a ~120k token system prompt on EVERY request. plus the whole conversation. the api is stateless.
+
+50 tool calls = the same bytes billed 50 times at full price.
+
+most of your bill is repetition.
+
+3/
+"but caching only works for identical prompts"
+
+wrong, and this misconception is the product.
+
+caching is a PREFIX match. tools + system prompt + old turns are identical bytes. only your newest turn changes.
+
+cached read on fable: 10% of input price. $1.20 becomes $0.12. per request.
+
+[attach: prefix-match.svg]
+
+4/
+so: one request param. mesh_optimize, 0 to 0.95.
+
+0.3 gets you cache breakpoint injection, max_tokens backstops, and pruning of tool outputs the model already consumed.
+
+every response carries a receipt:
+
+tokens_saved: 3488
+cost_saved_usd: 0.9349
+levers_applied: [...]
+
+real output, not a mock.
+
+[attach: try.ts terminal screenshot]
+
+5/
+the rule that surprised me most while building:
+
+NEVER rewrite content inside a cache breakpoint to save tokens. cached bytes cost 10%. fewer bytes at full price loses to more bytes at 10%.
+
+cheaper bytes beat fewer bytes. tattoo it somewhere.
+
+6/
+honesty constraints we hard-coded:
+
+- savings only claimed when measurable
+- estimation method disclosed in every receipt
+- cold cache writes can make savings NEGATIVE and we report that too. there's a unit test asserting we don't clamp it.
+
+an inflated savings number is an ad. ours is a receipt.
+
+7/
+our first live request returned HTTP 500.
+
+the baseline. zero optimization. the bug was my mental model of our own gateway: no top level system field, tool messages need tool_call_id, model ids are anthropic/claude-opus-4.8 not claude-opus-4-8.
+
+reading your own api docs is underrated.
+
+[attach: 500 error terminal screenshot]
+
+8/
+that 500 fixed three latent bugs in one afternoon:
+
+- cache lever now handles openai-shape system messages (how traffic actually arrives)
+- model matcher handles dot notation, fable savings were understated 3x
+- pricing now uses our catalog, what customers actually pay
+
+failures in week one beat support tickets in month six.
+
+9/
+it ships today in our CLI (meshapi-code) as a beta:
+
+/optimize 0.3
+
+after each turn you see exactly what happened:
+⚡ optimize beta (dial 0.3): ~4888 tok pruned, cache breakpoints set
+
+if the gateway ever rejects an optimized request, the CLI silently retries raw. the beta can never break your turn.
+
+[attach: CLI status line screenshot]
+
+10/
+beta means beta: the dial, levers, and receipt format may change. /optimize off or mesh_optimize: 0 is always a byte identical passthrough.
+
+reference implementation is MIT on github, 27 tests, zero deps:
+github.com/raushan-aifiesta/mesh-optimize
+
+full research writeup with the math: [blog link]
+
+11/
+the ceiling math, for the skeptics:
+
+agentic workload, 90% of tokens in a stable prefix:
+- caching: input cost drops to ~19%
+- + batch routing (latency flexible): ~9.5%
+
+90% saved before touching a single quality lever. a realtime chatbot can't get near that, and our dashboard will say so.
+
+[attach: stacking.svg]
+
+12/
+what we don't know yet (research means saying it):
+
+- production cache hit rates: unmeasured until gateway passthrough lands
+- classifier accuracy: heuristics v1, fails open
+- pruning thresholds: first guesses, will tune with traffic
+
+day 54. tomorrow: wiring the gateway.
+
+follow along.
+
+---
+posting notes:
+- post 1 hooks with the $100/9min number, post 11 handles the skeptics before they arrive
+- screenshots beat svg renders for posts 4, 7, 9 (real terminal = credibility)
+- if compressing to fewer posts, keep 1, 3, 4, 7, 10: hook, insight, product, story, link

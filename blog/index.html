@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building Mesh Optimize: a token savings dial for an LLM gateway (beta)</title>
+<meta name="author" content="Raushan Sharma">
+<meta name="description" content="Research notes from building Mesh Optimize, a beta token savings dial for Mesh API. Prompt caching mechanics, an honest savings receipt, real terminal outputs, and the 500 error that taught us the gateway schema.">
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; font-family: Georgia, serif; }
+  pre { background: #f6f6f4; padding: 12px; overflow-x: auto; font-size: 14px; line-height: 1.45; }
+  code { background: #f6f6f4; padding: 1px 4px; font-size: 0.92em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95em; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  img { max-width: 100%; height: auto; }
+  .beta { border: 1px solid #b58a00; background: #fdf6e3; padding: 10px 14px; font-size: 0.95em; }
+  figcaption { font-size: 0.85em; color: #555; }
+  h1, h2, h3 { line-height: 1.25; }
+</style>
+</head>
+<body>
+
+<h1>Building Mesh Optimize: a token savings dial for an LLM gateway</h1>
+
+<p>By Raushan Sharma, AI Fiesta. Published twelfth june twenty twenty-six.</p>
+
+<div class="beta">
+<strong>Beta disclaimer.</strong> Everything described here is a beta feature. The dial, the lever stack, the savings math, and the CLI command surface may all change. Per request opt out always works: <code>mesh_optimize: 0</code> in the API, <code>/optimize off</code> in the CLI. Do not build production billing assumptions on top of beta behavior.
+</div>
+
+<h2>Contents</h2>
+<ol>
+<li><a href="#problem">The bill problem</a></li>
+<li><a href="#caching">How prompt caching actually works, and why most people get it wrong</a></li>
+<li><a href="#design">One dial, two hints</a></li>
+<li><a href="#levers">The lever stack</a></li>
+<li><a href="#math">Savings math you can check</a></li>
+<li><a href="#build">The reference implementation</a></li>
+<li><a href="#500">The day the gateway said 500</a></li>
+<li><a href="#cli">Shipping it in the CLI</a></li>
+<li><a href="#unknown">What we do not know yet</a></li>
+<li><a href="#ceiling">Where the 95% ceiling comes from</a></li>
+<li><a href="#refs">References</a></li>
+</ol>
+
+<h2 id="problem">1. The bill problem</h2>
+
+<p>Claude Fable 5 launched on ninth june twenty twenty-six at $10 per million input tokens and $50 per million output tokens. Twice the price of Opus 4.8. Within days, people were posting screenshots of $100 plans drained in under 9 minutes.</p>
+
+<p>The mechanism behind those screenshots is not mysterious. Fable's coding clients carry a system prompt of roughly 120,000 tokens. The chat API is stateless, so an agentic session re-sends that prompt, plus the entire growing conversation, on every single turn. An agent that makes 50 tool calls sends the transcript 50 times. Most of those bytes are identical from one request to the next, and most of them get billed at full price anyway.</p>
+
+<p>I run Mesh API, an OpenAI compatible gateway that serves 300+ models through one key. Sitting in the request path between thousands of clients and the providers gives us a specific advantage: we can fix the repeated-bytes problem for customers without them changing their code. So we built Mesh Optimize, a single request parameter:</p>
+
+<pre>{
+  "model": "anthropic/claude-fable-5",
+  "messages": [...],
+  "mesh_optimize": 0.3
+}</pre>
+
+<p>One number, 0 to 0.95, that controls how aggressively the gateway cuts your token spend. And on every optimized response, a receipt:</p>
+
+<pre>"mesh_savings": {
+  "tokens_saved": 3488,
+  "cost_saved_usd": 0.9349,
+  "levers_applied": ["tool_result_pruning", "cache_injection", "max_tokens_default"],
+  "baseline_estimate_method": "pre_optimization_char_estimate_div4"
+}</pre>
+
+<p>That receipt is real output from the reference implementation, not a mockup. The rest of this post is how we got there, including the part where our first live request returned a 500 and taught us our own gateway's schema.</p>
+
+<div class="beta">Beta note: <code>mesh_optimize</code> is not yet enabled on the production gateway. The reference implementation and the CLI integration described below are where you can use it today.</div>
+
+<h2 id="caching">2. How prompt caching actually works, and why most people get it wrong</h2>
+
+<p>When I first pitched the caching lever, the obvious objection came up immediately, from me: caching only works when the same prompts repeat, right? Our users write new things every time. How does caching help someone building a new feature in their IDE?</p>
+
+<p>The objection is half right, and the half that's wrong is the whole product.</p>
+
+<p>Caching does not need the same prompt. It needs the same prefix. An Anthropic request renders in a fixed order: tools, then system prompt, then messages. The cache key is the exact bytes up to a marker called a cache breakpoint. Everything after the breakpoint can be brand new on every request and the cached part still hits.</p>
+
+<figure>
+<img src="assets/prefix-match.svg" alt="diagram of prefix matching: tools, system, history are stable, the new turn changes, breakpoints sit at the stability boundaries">
+<figcaption>The request, byte by byte. Stable content left, volatile content right, breakpoints at the boundary.</figcaption>
+</figure>
+
+<p>Now look at what an IDE agent actually sends. The 120k token system prompt: identical every request. The tool definitions: identical. The conversation history: request N is request N-1 plus one new turn, so the old turns are an unchanged prefix. The only genuinely new bytes are the latest turn. This traffic is not the worst case for caching. It is the best case that exists.</p>
+
+<p>The numbers on Fable 5: a cached read costs 10% of the input price. A 120k token system prompt costs about $1.20 per request uncached, and about $0.12 cached. Multiply by 50 turns in a session and the difference is the difference between the angry screenshots and a normal bill.</p>
+
+<p>Some details that matter and that we had to encode as rules, because each one silently zeroes your hit rate if you get it wrong:</p>
+
+<table>
+<tr><th>rule</th><th>why</th></tr>
+<tr><td>One byte of difference anywhere in the prefix invalidates everything after it</td><td>A timestamp interpolated into the system prompt, unsorted JSON keys, or a tool list that varies per request means zero hits, forever, with no error message</td></tr>
+<tr><td>Breakpoint injection must be deterministic</td><td>Same prefix in, same breakpoints out. If the optimizer places breakpoints differently across identical requests, the cache key changes and nothing matches</td></tr>
+<tr><td>Below the per model minimum, a breakpoint does nothing</td><td>Fable 5 and Sonnet 4.6 need 2048 tokens, Opus 4.8 and Haiku 4.5 need 4096. A marker on a small prompt is silently ignored, so we do not inject one</td></tr>
+<tr><td>Writes cost extra</td><td>A 5 minute TTL write costs 1.25x base input price, a 1 hour TTL write costs 2x. At 5 minutes you break even on the second request. At 1 hour you need three</td></tr>
+<tr><td>Never modify content inside an existing breakpoint</td><td>Cached input is 90% off. Rewriting cached bytes to save raw tokens breaks the cache and is a net loss. Compaction and pruning only ever apply to uncached content</td></tr>
+</table>
+
+<p>That last rule is the one I keep repeating to anyone who joins the project. Cheaper bytes beat fewer bytes. It is counterintuitive until you do the arithmetic once, and then it is obvious.</p>
+
+<h2 id="design">3. One dial, two hints</h2>
+
+<p>The easy product mistake here is shipping fifteen toggles: <code>cache: on</code>, <code>batch: on</code>, <code>prune_after_turns: 4</code>. Power users would love it for a week. Everyone else would set nothing and save nothing. We decided early: one dial, and the dial answers exactly one question. How much quality risk do you accept?</p>
+
+<p>But while building, we ran into levers the dial genuinely cannot infer. Batch routing saves 50% on everything with zero quality change, and stacks with caching. The catch is latency: batch responses take up to an hour. No dial value can guess whether your request is a chatbot reply or a nightly evals job. Only you know that.</p>
+
+<p>So the API grew a second, small field. Not preferences. Facts:</p>
+
+<pre>"mesh_hints": {
+  "latency": "flexible",
+  "session_id": "user-42-chat-7"
+}</pre>
+
+<p><code>latency: "flexible"</code> unlocks batch routing at any dial value. <code>session_id</code> tags requests that belong to one conversation, which lets a stateless gateway place cache breakpoints across turns and pre-warm a cache before its TTL expires. The dial stays the only knob. Hints describe your workload; they never toggle individual levers. Every future lever has to sort into one of those two buckets, and if it cannot, it does not ship.</p>
+
+<p>A nice accident we discovered later while reading our own API reference: the Mesh chat completions schema already has a top level <code>session_id</code> parameter. The hint can map straight onto it.</p>
+
+<h2 id="levers">4. The lever stack</h2>
+
+<figure>
+<img src="assets/flow.svg" alt="flow diagram: today apps call claude-fable-5 directly at full price; with mesh optimize the request passes a classifier and a cumulative lever stack, then returns with a savings receipt">
+<figcaption>The request path. Levers are cumulative: each tier includes everything below it.</figcaption>
+</figure>
+
+<table>
+<tr><th>dial</th><th>levers</th><th>quality risk</th></tr>
+<tr><td>0</td><td>everything off, byte identical passthrough</td><td>none</td></tr>
+<tr><td>0 to 0.2</td><td>cache breakpoint injection, max_tokens defaults per task class</td><td>none</td></tr>
+<tr><td>0.2 to 0.4</td><td>plus effort downgrade on routine calls (Anthropic models only), pruning of consumed tool results</td><td>minimal</td></tr>
+<tr><td>0.4 to 0.6</td><td>plus context compaction, subagent caps (phase two)</td><td>low</td></tr>
+<tr><td>0.6 to 0.8</td><td>plus model routing for classified simple calls, always disclosed in the response</td><td>moderate</td></tr>
+<tr><td>0.8 to 0.95</td><td>plus batch routing without a hint, hard compaction</td><td>high, power users</td></tr>
+</table>
+
+<p>Two levers deserve a closer look because they carry the early savings.</p>
+
+<h3>Cache injection</h3>
+
+<p>The optimizer finds the stable prefix and marks it. If the request has a large system prompt, breakpoint one goes after it. If the conversation has history, breakpoint two goes on the last message before the newest turn, so each request reuses the entire prior conversation. If the client already placed their own <code>cache_control</code> markers, we defer completely. They know their prefix better than a heuristic does.</p>
+
+<h3>Tool result pruning</h3>
+
+<p>This one is specific to agentic traffic, and in a tool calling CLI it is the most visible lever. When a model runs a command, the output lands in the conversation as a tool message. The model reads it, answers, and moves on. But the API is stateless, so that 5,000 line test log gets re-sent, and re-billed, on every turn after it. The model already consumed it. It is dead weight.</p>
+
+<figure>
+<img src="assets/pruning.svg" alt="before and after diagram: an old 17,600 character tool output is truncated to 400 characters with an audit marker, recent messages kept untouched">
+<figcaption>Pruning at dial 0.2 and above. The last four messages are never touched.</figcaption>
+</figure>
+
+<p>The pruning rule: tool results older than the last four messages get truncated to 400 characters plus a marker that says exactly what happened. And every pruned byte is logged with a sha256 of the original content. When a customer asks "why did the model forget my test output from earlier", the audit log has the answer. That logging requirement is not optional bookkeeping. Without it, a token optimizer is a machine for generating support tickets you cannot debug.</p>
+
+<h2 id="math">5. Savings math you can check</h2>
+
+<p>The receipt has one job: a customer should be able to recompute it. Three principles, each of which cost us a real decision:</p>
+
+<p>First, pruned tokens count at the estimate we disclose. We use serialized characters divided by 4, and the receipt names the method (<code>pre_optimization_char_estimate_div4</code>). Tokenizing every request twice just to make the receipt prettier would burn latency on exactly the hot path we are trying to lighten.</p>
+
+<p>Second, cache savings are computed from the provider's own usage fields, not estimated. The response tells us <code>cache_read_input_tokens</code> and <code>cache_creation_input_tokens</code>. Reads are credited at the 90% discount. Writes are debited at the 25% premium we caused. That last part matters: on the very first request of a session, the write premium can exceed the read savings, and the receipt goes negative. We report it. There is a unit test asserting that we do not clamp it:</p>
+
+<pre>✔ cache reads count at the 90% discount, writes subtract the 25% premium
+✔ pruned tokens count at full input price and as tokens_saved
+✔ cold cache write can go negative; reported honestly, not clamped
+✔ attachSavings does not mutate the provider response</pre>
+
+<p>Third, if we cannot measure it, we do not claim it. Effort downgrades on routine calls almost certainly save output tokens, but the counterfactual (what would this exact request have cost at high effort?) cannot be observed per request. So effort shows up in <code>levers_applied</code> and contributes nothing to <code>cost_saved_usd</code>. The number a customer sees is a floor, not a marketing ceiling. Past dial 0.5, the dashboard will show estimated quality impact next to the savings, because a savings number without its cost is an ad, not a receipt.</p>
+
+<h2 id="build">6. The reference implementation</h2>
+
+<p>The optimizer lives as a standalone TypeScript package, <a href="https://github.com/raushan-aifiesta/mesh-optimize">mesh-optimize on GitHub</a>, MIT licensed, zero runtime dependencies. It is middleware shaped: <code>prepare(request)</code> rewrites the request and returns a plan, <code>attachSavings(plan, response)</code> computes the receipt. The two properties the test suite guards hardest are determinism (same input twice, byte identical output twice) and non-mutation (the original request object is never touched).</p>
+
+<pre>$ npm test
+
+✔ dial 0 is a byte-identical passthrough
+✔ deterministic: same input gives same output
+✔ original request object is never mutated
+✔ fable guards strip temperature, top_k, thinking:disabled
+✔ cache injection converts large string system prompt and marks history
+✔ cache injection defers to client-set breakpoints
+✔ small prompts get no breakpoint (below cacheable minimum)
+✔ old tool results pruned, recent ones kept
+✔ pruning does not run below dial 0.2
+...
+ℹ tests 27
+ℹ pass 27
+ℹ fail 0</pre>
+
+<p>The fable guards line is worth explaining. Fable 5 rejects parameters that other models tolerate: <code>temperature</code> other than 1.0, <code>top_k</code>, an explicit <code>thinking: disabled</code>. The optimizer strips them before forwarding, because an optimizer that causes 400 errors has negative value. Here is the demo script output, end to end:</p>
+
+<pre>$ npx tsx try.ts
+
+classification: agentic
+levers applied: [ 'tool_result_pruning', 'cache_injection', 'max_tokens_default' ]
+system is now cached: true
+estimated tokens pruned: 3488
+temperature stripped for fable: true
+
+audit trail:
+ - [param_guard] removed temperature (fable requires 1.0 or unset)
+ - [tool_result_pruning] truncated tool result at message 2
+ - [cache_injection] breakpoint after system prompt (~3600 tokens)
+ - [cache_injection] breakpoint on conversation history (~3766 token prefix)
+ - [max_tokens_default] set max_tokens=4096 for agentic task
+
+mesh_savings receipt:
+{
+  tokens_saved: 3488,
+  cost_saved_usd: 0.9349,
+  levers_applied: [ 'tool_result_pruning', 'cache_injection', 'max_tokens_default' ],
+  baseline_estimate_method: 'pre_optimization_char_estimate_div4'
+}</pre>
+
+<p>That $0.9349 decomposes as: 3,488 pruned tokens at Fable's $10 per million, plus 100,000 cached tokens read at the 90% discount in the simulated response. You can do it on paper. That is the point.</p>
+
+<h2 id="500">7. The day the gateway said 500</h2>
+
+<p>Then we pointed the thing at the real gateway, and the very first request, the unoptimized baseline, did this:</p>
+
+<pre>$ npx tsx live-test.ts
+model: anthropic/claude-fable-5
+endpoint: https://api.meshapi.ai/v1/chat/completions
+
+[1. baseline (dial 0)] HTTP 500
+{
+  "error": {
+    "code": "upstream_error",
+    "message": "Upstream provider returned an error."
+  },
+  "request_id": "req_01KTW2VMVW59EQDSNF8FHNKSR3"
+}</pre>
+
+<p>I want to be honest about how clarifying this failure was, because the baseline request had zero optimization in it. The bug was in my mental model of our own gateway. I had written the test conversation in Anthropic's native shape: a top level <code>system</code> field, and a bare <code>role: "tool"</code> message. Reading the actual API reference at developers.meshapi.ai fixed three assumptions at once:</p>
+
+<table>
+<tr><th>what I assumed</th><th>what the schema actually says</th></tr>
+<tr><td>system prompt is a top level <code>system</code> field</td><td>there is no top level system field; the system prompt is <code>messages[0]</code> with <code>role: "system"</code></td></tr>
+<tr><td>a tool message can stand alone</td><td>tool messages need <code>tool_call_id</code> linking them to a preceding assistant <code>tool_calls</code> entry</td></tr>
+<tr><td>model ids look like <code>claude-fable-5</code></td><td>the catalog uses provider prefixed, dot versioned ids: <code>anthropic/claude-opus-4.8</code>, <code>anthropic/claude-sonnet-4.6</code></td></tr>
+</table>
+
+<p>Each of those was also a latent bug in the optimizer. The cache lever only knew how to mark a top level system field, but real traffic arrives with the system prompt as <code>messages[0]</code>, so it now handles both. The model matcher only knew bare dashed ids, so <code>anthropic/claude-opus-4.8</code> was silently falling through to default pricing, which understated Fable savings by 3x. And the savings math was using Anthropic's list prices when it should use Mesh's catalog prices, because the receipt has to reflect what the customer actually pays. From the catalog, per million tokens:</p>
+
+<table>
+<tr><th>model id (as Mesh serves it)</th><th>input</th><th>output</th></tr>
+<tr><td>anthropic/claude-fable-5</td><td>$10</td><td>$50</td></tr>
+<tr><td>anthropic/claude-opus-4.8</td><td>$5</td><td>$25</td></tr>
+<tr><td>anthropic/claude-opus-4.7</td><td>$5</td><td>$25</td></tr>
+<tr><td>anthropic/claude-sonnet-4.6</td><td>$3</td><td>$15</td></tr>
+<tr><td>anthropic/claude-haiku-4.5</td><td>$0.80</td><td>$4</td></tr>
+</table>
+
+<p>The live test now sends schema valid requests and carries a diagnostic: on any failure it fires a minimal probe request at the same model, so the output tells you whether the problem is the request shape or the endpoint itself. Debugging tooling you build for yourself in week one is the support tooling your customers benefit from in month six.</p>
+
+<div class="beta">Beta note: as of publication we have not yet confirmed whether the production gateway forwards injected <code>cache_control</code> markers to Anthropic and surfaces the cache usage fields back. That is the next integration step, and exactly what the live test measures. See section 9.</div>
+
+<h2 id="cli">8. Shipping it in the CLI</h2>
+
+<p>meshapi-code is our terminal chat REPL: streaming responses, file and shell tools behind approval prompts, real cost per turn. It is also the perfect first home for the optimizer, because a tool calling REPL is the workload where the levers bite hardest. Every <code>run_bash</code> output and file read lands in the conversation and gets re-sent on every later turn.</p>
+
+<p>The optimizer is now in the CLI as a Python port of the phase 1 levers. Off by default. One command:</p>
+
+<pre>/optimize 0.3        enable at dial 0.3
+/optimize off        disable, requests pass through untouched
+/optimize            show current setting</pre>
+
+<p>After each turn, the status line reports what actually happened:</p>
+
+<pre>anthropic/claude-opus-4.8  •  3122→214 tok  •  $0.021  •  session $0.084  •  6.1s
+⚡ optimize beta (dial 0.3): ~4888 tok pruned, cache breakpoints set</pre>
+
+<p>Works with every model Mesh serves, including <code>anthropic/claude-opus-4.8</code> and <code>anthropic/claude-fable-5</code>, with per model cache minimums respected automatically. Two design choices specific to the CLI:</p>
+
+<p>The CLI's own system prompt is small, around 500 tokens, well under any cache minimum. So in the CLI the workhorse is the history breakpoint: after a few agentic turns the conversation prefix crosses the threshold and gets marked. The system message lever exists for users who load big custom system prompts.</p>
+
+<p>And because this is a beta riding inside a tool people use for real work, the failure mode had to be designed first: if the gateway rejects an optimized request for any reason, the CLI retries the raw request once, automatically, and tells you it degraded. The beta can never be the reason your turn fails. The same dial 0 contract applies as everywhere else: <code>/optimize off</code> is a byte identical passthrough.</p>
+
+<div class="beta">Beta note: the <code>/optimize</code> command, the savings line format, and the dial semantics may change between CLI releases while the feature is in beta.</div>
+
+<h2 id="unknown">9. What we do not know yet</h2>
+
+<p>Research notes should say what is unproven, so here is the honest list.</p>
+
+<p>We have not yet measured cache hit rates through the production gateway. The optimizer injects breakpoints correctly (the test suite pins that), but whether the gateway forwards <code>cache_control</code> to Anthropic and returns <code>cache_read_input_tokens</code> in usage is the open question the live test exists to answer. If the answer is no, the work item moves to the gateway team and the client side stays as is.</p>
+
+<p>The classifier is heuristics only: message length, code patterns, tool presence, conversation depth. It runs in well under a millisecond and fails open (no classification means no downgrade). Whether it is accurate enough to gate effort downgrades at dial 0.2+ is a question for traffic data, not for me guessing harder.</p>
+
+<p>Pruning thresholds (keep the last 4 messages, truncate past 800 characters) are first guesses. They produced sensible behavior in testing. They are not tuned, and the spec says tune thresholds with data rather than redesigning the tiers.</p>
+
+<p>And the savings receipt's chars/4 estimate is conservative for code heavy content, which tokenizes denser than prose. The disclosed method makes this checkable, and we would rather under-report than ever get caught inflating.</p>
+
+<h2 id="ceiling">10. Where the 95% ceiling comes from</h2>
+
+<p>The headline claim needs its asterisk shown, so here it is. The savings stack multiplicatively, and they only stack all the way on the right workload shape.</p>
+
+<figure>
+<img src="assets/stacking.svg" alt="bar chart: full price 100 percent, with caching about 19 percent, with caching plus batch about 9.5 percent of original input cost">
+<figcaption>An agentic workload with 90% of its input tokens in a stable prefix, latency flexible. Neither lever touches the model or the prompt.</figcaption>
+</figure>
+
+<p>Take an agentic workload where 90% of input tokens sit in a stable prefix (a fat system prompt plus growing history, which is normal for IDE agents). Caching takes input cost to roughly 19% of baseline. If the customer flags <code>latency: "flexible"</code>, batch routing halves everything again, to about 9.5%. That is 90% saved before a single quality lever is touched. Output side discipline and pruning push further. The remaining few points to 95 come from the levers that do carry quality tradeoffs, which is exactly why they sit at the top of the dial behind disclosure rules.</p>
+
+<p>A realtime chatbot with short, unique prompts cannot get anywhere near that, and the dashboard will say so rather than pretend. If we ever show a customer a savings projection their own traffic shape cannot produce, the product deserves to die. The honest version is also the defensible version: no competitor gets accused of inflating numbers we publish the formula for.</p>
+
+<h2 id="refs">11. References</h2>
+
+<ul>
+<li>mesh-optimize reference implementation (TypeScript, MIT, tests, design notes): <a href="https://github.com/raushan-aifiesta/mesh-optimize">github.com/raushan-aifiesta/mesh-optimize</a></li>
+<li>meshapi-code, the Mesh CLI with the <code>/optimize</code> beta: <a href="https://github.com/aifiesta/meshapi-code">github.com/aifiesta/meshapi-code</a></li>
+<li>Mesh API developer docs (chat completions schema, model catalog, pricing): <a href="https://developers.meshapi.ai/">developers.meshapi.ai</a></li>
+<li>Mesh API chat completions reference: <a href="https://developers.meshapi.ai/api-reference/mesh-api/chat/completions-v-1-chat-completions-post.md">request schema</a></li>
+<li>Anthropic prompt caching documentation (cache_control, breakpoints, the 90% read discount and write premiums): platform.claude.com docs, build with Claude, prompt caching</li>
+<li>Anthropic batch API documentation (50% discount, latency characteristics): platform.claude.com docs, build with Claude, batch processing</li>
+<li>Effort parameter and cost control: <a href="https://platform.claude.com/docs/en/build-with-claude/effort">platform.claude.com/docs/en/build-with-claude/effort</a></li>
+<li>Claude Fable 5 workflows and subagent orchestration: <a href="https://code.claude.com/docs/en/workflows">code.claude.com/docs/en/workflows</a></li>
+</ul>
+
+<hr>
+
+<p>Raushan Sharma builds Mesh API at AI Fiesta. This post is part of a daily build in public series on X. The feature described is in beta; the dial, levers, and receipts may change. Found an error in the math? Open an issue on the repo. The receipt is supposed to be checkable, so check it.</p>
+
+</body>
+</html>

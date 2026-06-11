@@ -1,0 +1,22 @@
+<svg width="680" viewBox="0 0 680 300" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>how savings stack toward 95 percent</title>
+<desc>Bars showing input cost per request for an agentic workload: full price 100 percent, with caching about 19 percent, with caching plus batch about 9.5 percent, leaving roughly 90 percent saved before any quality lever is touched.</desc>
+<g font-family="sans-serif">
+<text x="40" y="36" font-size="14" font-weight="500" fill="#2C2C2A">input cost per request, agentic workload, 90% of tokens in a stable prefix</text>
+
+<text x="40" y="78" font-size="12" fill="#444441">no optimization</text>
+<rect x="200" y="62" width="440" height="24" rx="4" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.75"/>
+<text x="620" y="79" font-size="12" fill="#501313" text-anchor="end">100%</text>
+
+<text x="40" y="138" font-size="12" fill="#444441">+ cache injection</text>
+<rect x="200" y="122" width="84" height="24" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="292" y="139" font-size="12" fill="#633806">~19% (cached 90% of bytes at one tenth price)</text>
+
+<text x="40" y="198" font-size="12" fill="#444441">+ batch routing</text>
+<rect x="200" y="182" width="42" height="24" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="250" y="199" font-size="12" fill="#04342C">~9.5% (everything above, then 50% off)</text>
+
+<text x="40" y="252" font-size="12" fill="#5F5E5A">both levers leave the model, the prompt, and the output untouched.</text>
+<text x="40" y="270" font-size="12" fill="#5F5E5A">quality levers (rerouting, compaction) only matter for the last few points.</text>
+</g>
+</svg>

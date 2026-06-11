@@ -1,0 +1,41 @@
+<svg width="680" viewBox="0 0 680 360" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>prompt caching is a prefix match</title>
+<desc>A request renders as tools, then system prompt, then messages. A cache breakpoint after the system prompt covers everything before it. Changing one byte anywhere in the prefix invalidates every breakpoint after that position.</desc>
+<g font-family="sans-serif">
+<text x="40" y="36" font-size="14" font-weight="500" fill="#2C2C2A">request bytes, in render order</text>
+
+<rect x="40" y="56" width="120" height="48" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="100" y="76" font-size="14" font-weight="500" fill="#26215C" text-anchor="middle">tools</text>
+<text x="100" y="93" font-size="12" fill="#534AB7" text-anchor="middle">stable</text>
+
+<rect x="168" y="56" width="200" height="48" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="268" y="76" font-size="14" font-weight="500" fill="#26215C" text-anchor="middle">system prompt</text>
+<text x="268" y="93" font-size="12" fill="#534AB7" text-anchor="middle">stable, often 100k+ tokens</text>
+
+<rect x="376" y="56" width="160" height="48" rx="4" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="456" y="76" font-size="14" font-weight="500" fill="#26215C" text-anchor="middle">history</text>
+<text x="456" y="93" font-size="12" fill="#534AB7" text-anchor="middle">grows each turn</text>
+
+<rect x="544" y="56" width="96" height="48" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="592" y="76" font-size="14" font-weight="500" fill="#412402" text-anchor="middle">new turn</text>
+<text x="592" y="93" font-size="12" fill="#854F0B" text-anchor="middle">changes</text>
+
+<line x1="368" y1="48" x2="368" y2="112" stroke="#0F6E56" stroke-width="2"/>
+<text x="368" y="132" font-size="12" fill="#0F6E56" text-anchor="middle">breakpoint 1</text>
+<line x1="536" y1="48" x2="536" y2="112" stroke="#0F6E56" stroke-width="2"/>
+<text x="536" y="132" font-size="12" fill="#0F6E56" text-anchor="middle">breakpoint 2</text>
+
+<text x="40" y="180" font-size="14" font-weight="500" fill="#2C2C2A">what a cache hit pays</text>
+<rect x="40" y="196" width="496" height="32" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="288" y="217" font-size="12" fill="#04342C" text-anchor="middle">everything left of the last matched breakpoint: 10% of input price</text>
+<rect x="544" y="196" width="96" height="32" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="592" y="217" font-size="12" fill="#412402" text-anchor="middle">full price</text>
+
+<text x="40" y="280" font-size="14" font-weight="500" fill="#2C2C2A">what one changed byte does</text>
+<rect x="40" y="296" width="180" height="32" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="130" y="317" font-size="12" fill="#04342C" text-anchor="middle">still cached</text>
+<rect x="226" y="296" width="18" height="32" rx="4" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.75"/>
+<rect x="252" y="296" width="388" height="32" rx="4" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.75"/>
+<text x="446" y="317" font-size="12" fill="#501313" text-anchor="middle">one byte changed here: everything after it re-billed at full price</text>
+</g>
+</svg>

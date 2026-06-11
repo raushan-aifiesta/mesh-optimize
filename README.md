@@ -1,6 +1,10 @@
 # mesh-optimize
 
+> **Beta.** Everything here is a beta feature: the dial, the lever stack, the savings math, and the response format may change between releases. `mesh_optimize: 0` is always a byte identical passthrough. Do not build production billing assumptions on beta behavior.
+
 Gateway-level token optimization for [Mesh API](https://meshapi.ai). One dial from 0 to 0.95, a savings receipt on every response, and no change to your code beyond a single request field.
+
+Try it today in the Mesh CLI ([meshapi-code](https://github.com/aifiesta/meshapi-code)) with `/optimize 0.3`. The full research writeup, with the caching math, the honest savings rules, and the debugging story, is in [blog/index.html](blog/index.html).
 
 ![mesh optimize request flow](assets/flow.svg)
 

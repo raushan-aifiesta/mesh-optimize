@@ -1,0 +1,46 @@
+<svg width="680" viewBox="0 0 680 420" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>tool result pruning, before and after</title>
+<desc>Before: a conversation where an old 5000 character tool output is re-sent on every turn. After: the old tool output is truncated to 400 characters with an audit marker, recent messages untouched.</desc>
+<g font-family="sans-serif">
+<text x="40" y="36" font-size="14" font-weight="500" fill="#2C2C2A">before: every turn re-bills the whole log</text>
+<rect x="40" y="52" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="71" font-size="12" fill="#444441">user: fix the failing test</text>
+<rect x="40" y="86" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="105" font-size="12" fill="#444441">assistant: running the suite</text>
+<rect x="40" y="120" width="280" height="92" rx="4" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.75"/>
+<text x="52" y="139" font-size="12" fill="#501313">tool: FAIL auth.test.ts (17,600 chars)</text>
+<text x="52" y="156" font-size="12" fill="#A32D2D">consumed two turns ago,</text>
+<text x="52" y="173" font-size="12" fill="#A32D2D">billed again on every request,</text>
+<text x="52" y="190" font-size="12" fill="#A32D2D">~4,400 tokens of dead weight</text>
+<rect x="40" y="218" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="237" font-size="12" fill="#444441">assistant: patched, seconds vs ms bug</text>
+<rect x="40" y="252" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="271" font-size="12" fill="#444441">user: also run the linter</text>
+<rect x="40" y="286" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="305" font-size="12" fill="#444441">assistant: linter clean</text>
+<rect x="40" y="320" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="52" y="339" font-size="12" fill="#444441">user: status?</text>
+
+<line x1="336" y1="200" x2="356" y2="200" stroke="#888780" stroke-width="1.5"/>
+<path d="M350 194 L358 200 L350 206" fill="none" stroke="#888780" stroke-width="1.5"/>
+
+<text x="364" y="36" font-size="14" font-weight="500" fill="#2C2C2A">after: dial 0.2+, last 4 messages untouched</text>
+<rect x="364" y="52" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="376" y="71" font-size="12" fill="#444441">user: fix the failing test</text>
+<rect x="364" y="86" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="376" y="105" font-size="12" fill="#444441">assistant: running the suite</text>
+<rect x="364" y="120" width="280" height="58" rx="4" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+<text x="376" y="139" font-size="12" fill="#04342C">tool: FAIL auth.test.ts (first 400 chars)</text>
+<text x="376" y="156" font-size="12" fill="#0F6E56">[mesh: pruned 17,200 chars of</text>
+<text x="376" y="171" font-size="12" fill="#0F6E56">consumed tool output] + sha256 in audit</text>
+<rect x="364" y="184" width="280" height="28" rx="4" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+<text x="376" y="203" font-size="12" fill="#444441">assistant: patched, seconds vs ms bug</text>
+<rect x="364" y="218" width="280" height="28" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="376" y="237" font-size="12" fill="#633806">user: also run the linter (kept)</text>
+<rect x="364" y="252" width="280" height="28" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="376" y="271" font-size="12" fill="#633806">assistant: linter clean (kept)</text>
+<rect x="364" y="286" width="280" height="28" rx="4" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+<text x="376" y="305" font-size="12" fill="#633806">user: status? (kept)</text>
+<text x="364" y="350" font-size="12" fill="#0F6E56">~4,300 tokens removed from this and every later request</text>
+</g>
+</svg>
